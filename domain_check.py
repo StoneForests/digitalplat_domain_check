@@ -10,17 +10,20 @@ DigitalPlat (dpdns.org) 免费域名到期监控 + 分档提醒
   => 本脚本负责监控与提醒; 续费由你收到通知后到 dashboard 点一下"申请免费续费"完成
      (免费、无需支付, 窗口期 120 天内任意时间点均可, 不紧急)
 
-行为:
-  - 剩余 > 120 天: 只记日志, exit 0 (静默)
-  - 进入窗口后首次到达检查点 (120/90/60/30/14/7/3/1 天): 输出提醒, exit 1
-    (青龙任务配置"失败通知"即可收到推送; 无检查点的日子保持静默, 不刷屏)
-  - 已过期: exit 1 紧急提醒
+行为 (无论成功或失败都会通过 notify.py 的通知渠道推送):
+  - 剩余 > 120 天: 检查正常, 推送"检查正常"通知, exit 0
+  - 进入窗口后首次到达检查点 (120/90/60/30/14/7/3/1 天): 推送到期提醒, exit 1
+    (无检查点的日子保持静默, 不刷屏)
+  - 已过期: 推送紧急提醒, exit 1
+  - 运行失败 (key 缺失/接口异常/列表为空): 推送失败提醒, exit 1
 
 环境变量 (青龙 -> 环境变量):
   DP_API_KEY        必填, dp_live_ 开头的 API key
   DP_BASE_URL       可选, 默认 https://domain-api.digitalplat.org/api/v1
   DP_DOMAINS        可选, 逗号分隔, 只监控列出的域名 (默认: 账户内全部免费域名)
   RENEW_WINDOW_DAYS 可选, 免费续费窗口天数, 默认 120
+  通知渠道           复用 notify.py, 配置对应环境变量即可 (如 PUSH_KEY=server酱,
+                     SERVERCHAN_MAX_KEY=server酱MAX 等, 详见 notify.py)
 """
 import datetime
 import json
@@ -39,6 +42,25 @@ DASH_URL = "https://dashboard.digitalplat.org"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(SCRIPT_DIR, ".dpdns_watch_state.json")
+
+# 通知渠道: 复用同目录 notify.py, 通过环境变量启用 (如 PUSH_KEY / SERVERCHAN_MAX_KEY)
+try:
+    sys.path.insert(0, SCRIPT_DIR)
+    from notify import send as notify_send
+    NOTIFY_OK = True
+except Exception as e:
+    NOTIFY_OK = False
+
+
+def notify(title, content):
+    """通过 notify.py 发送通知; 通知模块不可用时仅记日志, 不影响主流程。"""
+    if not NOTIFY_OK:
+        log("WARNING: 通知模块不可用, 未发送通知: %s" % title)
+        return
+    try:
+        notify_send(title, content)
+    except Exception as e:
+        log("ERROR: 通知发送失败 %s: %s" % (title, e))
 
 
 def log(msg):
@@ -76,23 +98,31 @@ def parse_date(s):
 
 def main():
     if not API_KEY:
-        log("ERROR: 未设置 DP_API_KEY 环境变量")
+        msg = "未设置 DP_API_KEY 环境变量"
+        log("ERROR: %s" % msg)
+        notify("❌ DigitalPlat 域名检查失败", msg)
         sys.exit(1)
 
     code, data = api_get("/domains")
     if code != 200:
-        log("ERROR: 拉取域名列表失败 HTTP %s: %s" % (code, json.dumps(data, ensure_ascii=False)[:300]))
+        msg = "拉取域名列表失败 HTTP %s: %s" % (code, json.dumps(data, ensure_ascii=False)[:300])
+        log("ERROR: %s" % msg)
+        notify("❌ DigitalPlat 域名检查失败", msg)
         sys.exit(1)
 
     domains = data.get("data", [])
     if not domains:
-        log("WARNING: 域名列表为空, 请检查 key 权限")
+        msg = "域名列表为空, 请检查 key 权限"
+        log("WARNING: %s" % msg)
+        notify("❌ DigitalPlat 域名检查失败", msg)
         sys.exit(1)
 
     today = datetime.date.today()
     st = load_state()
     checkpoints = sorted({WINDOW} | {c for c in CHECKPOINTS if c < WINDOW}, reverse=True)
     alerts = []
+    status_lines = []
+    checked = 0
 
     for d in domains:
         name = d.get("domain", "")
@@ -105,7 +135,10 @@ def main():
             log("跳过 %s: 无法解析到期日 %r" % (name, d.get("expires_at")))
             continue
         days_left = (expires - today).days
-        log("%s: 到期 %s, 剩余 %s 天 (slot=%s)" % (name, expires, days_left, slot))
+        checked += 1
+        line = "%s: 到期 %s, 剩余 %s 天 (slot=%s)" % (name, expires, days_left, slot)
+        status_lines.append(line)
+        log(line)
 
         if days_left <= 0:
             alerts.append(
@@ -141,7 +174,15 @@ def main():
     if alerts:
         for a in alerts:
             log(a)
+        content = "\n\n".join(alerts)
+        if status_lines:
+            content += "\n\n--- 当前状态 ---\n" + "\n".join(status_lines)
+        notify("⚠️ DigitalPlat 域名到期提醒", content)
         sys.exit(1)
+
+    log("检查完成, 共 %s 个域名, 全部正常" % checked)
+    notify("✅ DigitalPlat 域名检查正常",
+           "共检查 %s 个域名:\n\n%s" % (checked, "\n".join(status_lines) if status_lines else "(无匹配域名)"))
     sys.exit(0)
 
 
