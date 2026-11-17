@@ -6,21 +6,19 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `domain_check.py` | 主脚本：调用 DigitalPlat 公共 API 拉取域名列表，计算剩余天数，按检查点分档提醒，并在成功/失败时发送通知 |
-| `notify.py` | 通知库：提供几十种通知渠道（server酱 / server酱MAX / 钉钉 / 企业微信 / Telegram 等），通过环境变量启用，`domain_check.py` 自动复用 |
+| `domain_check.py` | 唯一脚本：调用 DigitalPlat 公共 API 拉取域名列表，计算剩余天数，剩余 ≤ 120 天时每天提醒续费，并在成功/失败时发送通知 |
+
+> 通知功能直接复用**青龙面板自带的 `notify.py`**（无需在本仓库中携带）。青龙任务工作目录就是脚本目录，脚本会自动 `from notify import send` 加载它；只要你在青龙里配好了通知 key，本脚本就能直接推送。
 
 ## 工作原理
 
-- 剩余天数 > 120 天：检查正常，推送 **✅ 检查正常** 通知，`exit 0`
-- 进入免费续费窗口（默认 120 天）后首次到达检查点（120/90/60/30/14/7/3/1 天）：推送 **⚠️ 到期提醒** 通知（含操作指引），`exit 1`（无检查点的日子保持静默）
-- 已过期：推送 **紧急提醒**，`exit 1`
-- 运行失败（key 缺失 / 接口异常 / 列表为空）：推送 **❌ 检查失败** 通知，`exit 1`
+一句话：每天检查免费域名还剩多少天到期，**一旦少于 120 天（进入免费续费窗口）就每天提醒你去续费**；检查成功、到期临近、已过期、运行失败都会通知（成功 `exit 0`，需关注或失败 `exit 1`）。
 
 > 免费续费只能在 dashboard 浏览器页面点「申请免费续费」完成（免费、无需支付，窗口期 120 天内任意时间点均可），收到提醒后手动处理即可。
 
 ## 青龙面板部署
 
-1. 将两个 py 文件放到青龙的**同一目录**（如 `/ql/scripts/`），`notify.py` 必须与 `domain_check.py` 同目录
+1. 上传 `domain_check.py`（放到青龙脚本目录，如 `/ql/scripts/` 的任一位置即可）
 2. 在青龙面板 **环境变量** 中配置下述 key
 3. 新建定时任务：命令 `python3 domain_check.py`，定时规则建议 `0 9 * * *`（每天 9 点）
 
@@ -33,22 +31,15 @@
 | `DP_DOMAINS` | 可选 | 逗号分隔，只监控列出的域名；不填则监控账户内全部免费域名 |
 | `RENEW_WINDOW_DAYS` | 可选 | 免费续费窗口天数，默认 `120` |
 
-### 需要配置的 key（通知渠道，选自 notify.py）
+### 需要配置的 key（通知渠道，青龙自带 notify.py 支持）
 
 > 任选至少一个渠道启用即可。设置了哪些 key，通知就会走哪些渠道（会同时推送到所有已启用的渠道）。下面按渠道分组列出每个 key 的作用。
 
-**Server酱 / Server酱MAX（推荐）**
+**Server酱 / Bark / PushDeer / PushMe**
 
 | 环境变量 | 作用 |
 | --- | --- |
-| `PUSH_KEY` | Server酱的 SendKey，兼容旧版与 Turbo 版，`SCT` 开头走新版接口 |
-| `SERVERCHAN_MAX_KEY` | Server酱MAX 的 token，形如 `scx-10261-rBsGMGrMBbyUqoc4iw4sgpLF`，接口地址中的 `{XXXX}` 即 token 中间的数字（用户编号） |
-| `SERVERCHAN_MAX_TAGS` | Server酱MAX 的消息标签，逗号分隔，用于区分不同脚本/消息来源（如 `域名监控`）；不设置时默认用消息标题作为标签 |
-
-**Bark / PushDeer / PushMe**
-
-| 环境变量 | 作用 |
-| --- | --- |
+| `PUSH_KEY` | Server酱的 SendKey，兼容旧版与 Turbo 版，`SCT` 开头走新版接口（推荐，微信直达） |
 | `BARK_PUSH` | Bark 的 IP 或设备码，形如 `https://api.day.app/DxHcxxxxxRxxxxxxcm/` |
 | `BARK_ARCHIVE` | Bark 推送是否存档 |
 | `BARK_GROUP` | Bark 推送分组 |
@@ -105,19 +96,18 @@
 | `SKIP_PUSH_TITLE` | 按标题跳过某些推送，多个标题用回车分隔 |
 | `CONSOLE` | 是否在控制台输出通知内容，默认 `true` |
 
-## 最小配置示例（只用 Server酱MAX）
+## 最小配置示例（只用 Server酱）
 
 ```
 DP_API_KEY = dp_live_xxxxxxxxxxxxxxxx
-SERVERCHAN_MAX_KEY = scx-xxxxx-xxxxxxxxx
-SERVERCHAN_MAX_TAGS = 域名监控
+PUSH_KEY = SCTxxxxxxxxxxxxxxxxxx
 ```
 
-配置完成后，保存并运行任务即可。每次运行无论成功失败都会收到 Server酱MAX 推送，且带 `域名监控` 标签便于在微信里和其他来源的消息区分。
+配置完成后，保存并运行任务即可。每次运行无论成功失败都会收到 Server酱 推送。
 
 ## 常见问题
 
-- **收不到通知？** 检查是否至少配置了一个通知渠道的 key（如 `SERVERCHAN_MAX_KEY`），确认 `notify.py` 与 `domain_check.py` 在同一目录。
+- **收不到通知？** 检查是否至少配置了一个通知渠道的 key（如 `PUSH_KEY`），并确认青龙面板的系统设置里已开启对应渠道；`notify.py` 由青龙自带，无需上传。
+- **为什么窗口期内每天都收到提醒？** 这是有意设计：脚本一天跑一次，剩余天数一旦 ≤ 120 天每天都会提醒，直到你续费后剩余天数恢复到 120 天以上才停止，避免漏掉。
 - **想同时用多个渠道？** 直接配置多个通知渠道的 key 即可，会同时推送。
-- **状态文件**：脚本会在同目录生成 `.dpdns_watch_state.json` 记录已提醒过的检查点，避免刷屏，请保留该文件。
 

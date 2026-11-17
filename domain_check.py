@@ -10,10 +10,10 @@ DigitalPlat (dpdns.org) 免费域名到期监控 + 分档提醒
   => 本脚本负责监控与提醒; 续费由你收到通知后到 dashboard 点一下"申请免费续费"完成
      (免费、无需支付, 窗口期 120 天内任意时间点均可, 不紧急)
 
-行为 (无论成功或失败都会通过 notify.py 的通知渠道推送):
+行为 (无论成功或失败都会通过青龙自带的 notify.py 通知):
   - 剩余 > 120 天: 检查正常, 推送"检查正常"通知, exit 0
-  - 进入窗口后首次到达检查点 (120/90/60/30/14/7/3/1 天): 推送到期提醒, exit 1
-    (无检查点的日子保持静默, 不刷屏)
+  - 剩余 <= 120 天 (进入免费续费窗口): 推送续费提醒, exit 1
+    (青龙一天跑一次, 窗口期内每天都提醒, 直到续费后剩余天数回到 120 天以上)
   - 已过期: 推送紧急提醒, exit 1
   - 运行失败 (key 缺失/接口异常/列表为空): 推送失败提醒, exit 1
 
@@ -22,8 +22,8 @@ DigitalPlat (dpdns.org) 免费域名到期监控 + 分档提醒
   DP_BASE_URL       可选, 默认 https://domain-api.digitalplat.org/api/v1
   DP_DOMAINS        可选, 逗号分隔, 只监控列出的域名 (默认: 账户内全部免费域名)
   RENEW_WINDOW_DAYS 可选, 免费续费窗口天数, 默认 120
-  通知渠道           复用 notify.py, 配置对应环境变量即可 (如 PUSH_KEY=server酱,
-                     SERVERCHAN_MAX_KEY=server酱MAX 等, 详见 notify.py)
+  通知渠道           直接调用青龙自带的 notify.py (面板内置, 无需上传),
+                     在青龙环境变量/系统设置中配置渠道 key 即可 (如 PUSH_KEY=server酱)
 """
 import datetime
 import json
@@ -36,29 +36,30 @@ BASE_URL = os.environ.get("DP_BASE_URL", "https://domain-api.digitalplat.org/api
 API_KEY = os.environ.get("DP_API_KEY", "").strip()
 WINDOW = int(os.environ.get("RENEW_WINDOW_DAYS", "120"))
 ONLY_DOMAINS = [d.strip().lower() for d in os.environ.get("DP_DOMAINS", "").split(",") if d.strip()]
-CHECKPOINTS = [120, 90, 60, 30, 14, 7, 3, 1]
 TIMEOUT = 30
 DASH_URL = "https://dashboard.digitalplat.org"
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-STATE_FILE = os.path.join(SCRIPT_DIR, ".dpdns_watch_state.json")
-
-# 通知渠道: 复用同目录 notify.py, 通过环境变量启用 (如 PUSH_KEY / SERVERCHAN_MAX_KEY)
+# ---------------- 统一通知模块加载 ----------------
+# 直接调用青龙自带的 notify.py（面板内置在脚本目录，无需在仓库中自带）。
+# 青龙任务的工作目录就是脚本目录，因此 from notify import send 会命中青龙的 notify.py。
+hadsend = False
+send = None
 try:
-    sys.path.insert(0, SCRIPT_DIR)
-    from notify import send as notify_send
-    NOTIFY_OK = True
-except Exception as e:
-    NOTIFY_OK = False
+    from notify import send
+    hadsend = True
+    print("✅ 已加载青龙内置 notify.py 通知模块")
+except ImportError:
+    print("⚠️ 未找到 notify.py 通知模块，跳过通知功能（不影响域名检查）")
+NOTIFY_OK = hadsend
 
 
 def notify(title, content):
-    """通过 notify.py 发送通知; 通知模块不可用时仅记日志, 不影响主流程。"""
+    """通过青龙 notify.py 发送通知; 通知模块不可用时仅记日志, 不影响主流程。"""
     if not NOTIFY_OK:
         log("WARNING: 通知模块不可用, 未发送通知: %s" % title)
         return
     try:
-        notify_send(title, content)
+        send(title, content)
     except Exception as e:
         log("ERROR: 通知发送失败 %s: %s" % (title, e))
 
@@ -75,21 +76,6 @@ def api_get(path):
     except ValueError:
         data = {"raw": r.text[:500]}
     return r.status_code, data
-
-
-def load_state():
-    try:
-        with open(STATE_FILE) as f:
-            st = json.load(f)
-        st.setdefault("fired", {})
-        return st
-    except Exception:
-        return {"fired": {}}
-
-
-def save_state(st):
-    with open(STATE_FILE, "w") as f:
-        json.dump(st, f, ensure_ascii=False)
 
 
 def parse_date(s):
@@ -118,8 +104,6 @@ def main():
         sys.exit(1)
 
     today = datetime.date.today()
-    st = load_state()
-    checkpoints = sorted({WINDOW} | {c for c in CHECKPOINTS if c < WINDOW}, reverse=True)
     alerts = []
     status_lines = []
     checked = 0
@@ -154,22 +138,12 @@ def main():
             log("尚未进入窗口 (剩余 > %s 天), 无需提醒" % WINDOW)
             continue
 
-        # 窗口期内: 检查到达但未发过的提醒点 (含部署滞后一次性补发)
-        key = "%s@%s" % (name, d.get("expires_at"))
-        fired = st["fired"].get(key, [])
-        due = [c for c in checkpoints if days_left <= c and c not in fired]
-        if due:
-            fired.extend(sorted(due, reverse=True))
-            st["fired"][key] = fired
-            save_state(st)
-            alerts.append(
-                "⏰ %s 免费续费窗口开启/临近 (到期 %s, 剩余 %s 天, 已过检查点: %s)\n"
-                "   需要你做 (免费, 无需支付, 有效期内点一次即可):\n"
-                "   登录 %s -> 域名 -> %s -> [续费] 页 -> 点「申请免费续费」"
-                % (name, expires, days_left, "/".join(str(c) for c in sorted(due, reverse=True)),
-                   DASH_URL, name))
-            continue
-        log("窗口期内, 等待续费, 本检查点已提醒过, 保持静默")
+        # 窗口期内: 每天提醒续费 (青龙一天跑一次, 一旦 <= 窗口天数就提醒)
+        alerts.append(
+            "⏰ %s 免费续费窗口开启/临近 (到期 %s, 剩余 %s 天)\n"
+            "   需要你做 (免费, 无需支付, 有效期内点一次即可):\n"
+            "   登录 %s -> 域名 -> %s -> [续费] 页 -> 点「申请免费续费」"
+            % (name, expires, days_left, DASH_URL, name))
 
     if alerts:
         for a in alerts:
