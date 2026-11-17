@@ -109,7 +109,7 @@
 
 ```
 DP_API_KEY = dp_live_xxxxxxxxxxxxxxxx
-SERVERCHAN_MAX_KEY = scx-10261-rBsGMGrMBbyUqoc4iw4sgpLF
+SERVERCHAN_MAX_KEY = scx-xxxxx-xxxxxxxxx
 SERVERCHAN_MAX_TAGS = 域名监控
 ```
 
